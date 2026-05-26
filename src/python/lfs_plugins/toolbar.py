@@ -58,21 +58,9 @@ def _tooltip_text(label, shortcut=""):
     return label or ""
 
 
-def _keymap_shortcut(lf, action_name, mode_name="GLOBAL"):
-    try:
-        keymap = lf.keymap
-        action = getattr(keymap.Action, action_name)
-        mode = getattr(keymap.ToolMode, mode_name)
-        shortcut = keymap.get_trigger_description(action, mode)
-    except Exception:
-        return ""
-    if not shortcut or shortcut == "Unbound":
-        return ""
-    return str(shortcut)
-
-
 def _button_record(button_id, action, value, icon_src, *,
-                   tooltip_key="", tooltip_text="", shortcut_text="", selected=False, enabled=True):
+                   tooltip_key="", tooltip_text="", action_id="",
+                   selected=False, enabled=True):
     return {
         "button_id": button_id,
         "action": action,
@@ -80,7 +68,7 @@ def _button_record(button_id, action, value, icon_src, *,
         "icon_src": icon_src,
         "tooltip_key": tooltip_key,
         "tooltip_text": tooltip_text,
-        "shortcut_text": shortcut_text,
+        "action_id": action_id,
         "selected": selected,
         "enabled": enabled,
     }
@@ -228,10 +216,7 @@ class _GizmoToolbarController:
         )
 
     def _tool_button_record(self, tool_def, active_tool_id, context):
-        import lichtfeld as lf
-
         tooltip_key = self._TOOL_LOCALE_KEYS.get(tool_def.id, "")
-        action_name = self._TOOL_ACTIONS.get(tool_def.id, "")
         return _button_record(
             f"tool-{tool_def.id}",
             "tool",
@@ -239,7 +224,7 @@ class _GizmoToolbarController:
             _tool_icon_src(tool_def),
             tooltip_key=tooltip_key,
             tooltip_text="" if tooltip_key else _tooltip_text(tool_def.label, tool_def.shortcut),
-            shortcut_text=_keymap_shortcut(lf, action_name) if action_name else "",
+            action_id=self._TOOL_ACTIONS.get(tool_def.id, ""),
             selected=_tool_selected(tool_def, active_tool_id, context),
             enabled=tool_def.can_activate(context),
         )
@@ -271,7 +256,7 @@ class _GizmoToolbarController:
                     _icon_src(mode.icon) if mode.icon else "",
                     tooltip_key=tooltip_key,
                     tooltip_text="" if tooltip_key else _tooltip_text(mode.label, mode.shortcut),
-                    shortcut_text=_keymap_shortcut(lf, self._SELECTION_MODE_ACTIONS.get(mode.id, "")),
+                    action_id=self._SELECTION_MODE_ACTIONS.get(mode.id, ""),
                     selected=selected,
                     enabled=enabled,
                 )
@@ -285,7 +270,7 @@ class _GizmoToolbarController:
             active_mode["icon_src"] if active_mode else _tool_icon_src(tool_def),
             tooltip_key=self._TOOL_LOCALE_KEYS.get(tool_def.id, ""),
             tooltip_text="",
-            shortcut_text=_keymap_shortcut(lf, "TOOL_SELECT"),
+            action_id="TOOL_SELECT",
             selected=active_tool_id == "builtin.select",
             enabled=enabled,
         )
@@ -308,7 +293,7 @@ class _GizmoToolbarController:
             active_button["icon_src"] if active_button else fallback["icon_src"],
             tooltip_key=active_button["tooltip_key"] if active_button else "",
             tooltip_text=active_button["tooltip_text"] if active_button else "Transform Tools",
-            shortcut_text=active_button["shortcut_text"] if active_button else "",
+            action_id=active_button["action_id"] if active_button else "",
             selected=active_button is not None,
             enabled=any(b["enabled"] for b in tool_buttons),
         )
@@ -511,19 +496,19 @@ class _UtilityToolbarController:
         primary_buttons = [
             _button_record("util-home", "home", "", _icon_src("home"),
                            tooltip_key="toolbar.home",
-                           shortcut_text=_keymap_shortcut(lf, self._PRIMARY_ACTIONS["home"])),
+                           action_id=self._PRIMARY_ACTIONS["home"]),
             _button_record(
                 "util-fullscreen",
                 "fullscreen",
                 "",
                 _icon_src("arrows-minimize" if is_fullscreen else "arrows-maximize"),
                 tooltip_key="toolbar.fullscreen",
-                shortcut_text=_keymap_shortcut(lf, self._PRIMARY_ACTIONS["fullscreen"]),
+                action_id=self._PRIMARY_ACTIONS["fullscreen"],
                 selected=is_fullscreen,
             ),
             _button_record("util-toggle-ui", "toggle_ui", "", _icon_src("layout-off"),
                            tooltip_key="toolbar.toggle_ui",
-                           shortcut_text=_keymap_shortcut(lf, self._PRIMARY_ACTIONS["toggle_ui"])),
+                           action_id=self._PRIMARY_ACTIONS["toggle_ui"]),
         ]
 
         render_mode_buttons = []
@@ -571,6 +556,7 @@ class _UtilityToolbarController:
                     "",
                     _icon_src("layout-columns"),
                     tooltip_text="Independent Split View",
+                    action_id="toggle_independent_split_view",
                     selected=lf.ui.get_split_view_mode() == "independent_dual",
                 )
             )
