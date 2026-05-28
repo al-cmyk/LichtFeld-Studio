@@ -158,7 +158,7 @@ namespace lfs::core {
                     GPUSlabAllocator::instance().deallocate(ptr, size);
                     return;
                 case AllocMethod::Bucketed:
-                    SizeBucketedPool::instance().cache_free(ptr, size);
+                    SizeBucketedPool::instance().cache_free(ptr, size, stream);
                     return;
                 case AllocMethod::Direct:
                     cudaFree(ptr);
@@ -201,7 +201,7 @@ namespace lfs::core {
                 size_t size;
                 if (lookup_allocation(ptr, method, size) && method == AllocMethod::Bucketed) {
                     untrack_allocation(ptr);
-                    SizeBucketedPool::instance().cache_free(ptr, size);
+                    SizeBucketedPool::instance().cache_free(ptr, size, stream);
                     return;
                 }
             }
