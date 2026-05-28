@@ -204,6 +204,8 @@ void VulkanGSRenderer::initializeExternal(const std::map<std::string, std::strin
         createComputePipeline(pipeline_compute_tile_ranges[i], spirv_paths.at("compute_tile_ranges"));
         createComputePipeline(pipeline_rasterize_forward[i], spirv_paths.at("rasterize_forward"));
         createComputePipeline(pipeline_rasterize_forward_3dgut[i], spirv_paths.at("rasterize_forward_3dgut"));
+        createComputePipeline(pipeline_rasterize_forward_plain[i], spirv_paths.at("rasterize_forward_plain"));
+        createComputePipeline(pipeline_rasterize_forward_3dgut_plain[i], spirv_paths.at("rasterize_forward_3dgut_plain"));
     }
     createComputePipeline(pipeline_cumsum.single_pass, spirv_paths.at("cumsum_single_pass"));
     createComputePipeline(pipeline_cumsum.block_scan, spirv_paths.at("cumsum_block_scan"));
@@ -378,7 +380,8 @@ void VulkanGSRenderer::executeRasterizeForward(
     const _VulkanBuffer& overlay_params,
     const _VulkanBuffer& transform_indices,
     const _VulkanBuffer& model_transforms,
-    bool use_gut_rasterization) {
+    bool use_gut_rasterization,
+    bool overlays_active) {
     if (buffers.num_indices == 0)
         return;
 
@@ -407,10 +410,13 @@ void VulkanGSRenderer::executeRasterizeForward(
                         COMPUTE_SHADER_READ);
 
     if (use_gut_rasterization) {
+        auto& gut_pipeline = overlays_active
+                                 ? pipeline_rasterize_forward_3dgut
+                                 : pipeline_rasterize_forward_3dgut_plain;
         executeCompute(
             {{uniforms.image_width, TILE_WIDTH}, {uniforms.image_height, TILE_HEIGHT}},
             &uniforms, sizeof(uniforms),
-            pipeline_rasterize_forward_3dgut[buffers.is_unsorted_1],
+            gut_pipeline[buffers.is_unsorted_1],
             std::vector<_VulkanBuffer>({
                 // inputs
                 buffers.sorted_gauss_idx().deviceBuffer,
@@ -437,10 +443,13 @@ void VulkanGSRenderer::executeRasterizeForward(
                 model_transforms,
             }));
     } else {
+        auto& pipeline = overlays_active
+                             ? pipeline_rasterize_forward
+                             : pipeline_rasterize_forward_plain;
         executeCompute(
             {{uniforms.image_width, TILE_WIDTH}, {uniforms.image_height, TILE_HEIGHT}},
             &uniforms, sizeof(uniforms),
-            pipeline_rasterize_forward[buffers.is_unsorted_1],
+            pipeline[buffers.is_unsorted_1],
             std::vector<_VulkanBuffer>({
                 // inputs
                 buffers.sorted_gauss_idx().deviceBuffer,

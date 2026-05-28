@@ -149,6 +149,7 @@ namespace lfs::vis {
             _VulkanBuffer node_mask{};
             _VulkanBuffer overlay_params{};
             _VulkanBuffer model_transforms{};
+            bool overlays_active = true;
         };
         [[nodiscard]] std::expected<OverlayBindingViews, std::string> uploadSelectionOverlay(
             VulkanContext& context,

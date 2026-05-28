@@ -172,6 +172,9 @@ namespace lfs::vis {
                 {"compute_tile_ranges", (root / "generated/compute_tile_ranges.spv").string()},
                 {"rasterize_forward", (root / "generated/rasterize_forward.spv").string()},
                 {"rasterize_forward_3dgut", (root / "generated/rasterize_forward_3dgut.spv").string()},
+                {"rasterize_forward_plain", (root / "generated/rasterize_forward_plain.spv").string()},
+                {"rasterize_forward_3dgut_plain",
+                 (root / "generated/rasterize_forward_3dgut_plain.spv").string()},
                 {"cumsum_single_pass", (root / "generated/cumsum_single_pass.spv").string()},
                 {"cumsum_block_scan", (root / "generated/cumsum_block_scan.spv").string()},
                 {"cumsum_scan_block_sums", (root / "generated/cumsum_scan_block_sums.spv").string()},
@@ -1298,6 +1301,26 @@ namespace lfs::vis {
             hasOverlayTensor(request.overlay.emphasis.transient_mask.mask, num_splats);
         const bool transform_indices_enabled = hasTransformIndices(request.scene.transform_indices, num_splats);
 
+        // Whether the forward rasterizer must run the overlay/selection path.
+        // When nothing draws an overlay, the host dispatches the *_plain shader
+        // variant, which strips that work from the per-pixel inner loop — the
+        // dominant cost when zoomed out. Conservative: any uncertainty keeps the
+        // full path (correctness over speed).
+        const auto& emphasis = request.overlay.emphasis;
+        const bool overlays_active =
+            selection_enabled ||
+            preview_enabled ||
+            !emphasis.emphasized_node_mask.empty() ||
+            request.filters.crop_region.has_value() ||
+            request.filters.ellipsoid_region.has_value() ||
+            request.filters.view_volume.has_value() ||
+            emphasis.dim_non_emphasized ||
+            emphasis.flash_intensity > 0.0f ||
+            emphasis.focused_gaussian_id >= 0 ||
+            request.overlay.cursor.enabled ||
+            request.overlay.markers.show_rings ||
+            request.overlay.markers.show_center_markers;
+
         // Only reserve the per-gaussian mask regions when their feature is active.
         // The compose shader reads selection_mask/preview_mask solely under the
         // matching selection flag (alphablend_shader.slang), and the C++ upload is
@@ -1596,6 +1619,7 @@ namespace lfs::vis {
             .node_mask = view(OverlayNodeMask),
             .overlay_params = view(OverlayParams),
             .model_transforms = view(OverlayModelTransforms),
+            .overlays_active = overlays_active,
         };
     }
 
@@ -3438,7 +3462,8 @@ namespace lfs::vis {
                                                       overlay_bindings->overlay_params,
                                                       overlay_bindings->transform_indices,
                                                       overlay_bindings->model_transforms,
-                                                      request.gut);
+                                                      request.gut,
+                                                      overlay_bindings->overlays_active);
                 }
                 {
                     LOG_TIMER("vksplat.selection_overlay.record.composePixelState");
@@ -3680,7 +3705,8 @@ namespace lfs::vis {
                                                           overlay_bindings->overlay_params,
                                                           overlay_bindings->transform_indices,
                                                           overlay_bindings->model_transforms,
-                                                          request.gut);
+                                                          request.gut,
+                                                          overlay_bindings->overlays_active);
                     }
                 }
                 {

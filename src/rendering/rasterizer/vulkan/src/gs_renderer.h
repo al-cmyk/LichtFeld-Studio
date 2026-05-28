@@ -108,7 +108,8 @@ public:
                                  const _VulkanBuffer& overlay_params,
                                  const _VulkanBuffer& transform_indices,
                                  const _VulkanBuffer& model_transforms,
-                                 bool use_gut_rasterization = false);
+                                 bool use_gut_rasterization = false,
+                                 bool overlays_active = true);
     void executeSelectionMask(const VulkanGSSelectionMaskUniforms& uniforms,
                               VulkanGSPipelineBuffers& buffers,
                               const _VulkanBuffer& transform_indices,
@@ -182,6 +183,8 @@ protected:
         _ComputePipeline(3)};
     _ComputePipelinePair pipeline_rasterize_forward = _ComputePipelinePair(14);
     _ComputePipelinePair pipeline_rasterize_forward_3dgut = _ComputePipelinePair(20);
+    _ComputePipelinePair pipeline_rasterize_forward_plain = _ComputePipelinePair(14);
+    _ComputePipelinePair pipeline_rasterize_forward_3dgut_plain = _ComputePipelinePair(20);
     struct _CumsumComputePipeline {
         _ComputePipeline single_pass = _ComputePipeline(2);
         _ComputePipeline block_scan = _ComputePipeline(3);

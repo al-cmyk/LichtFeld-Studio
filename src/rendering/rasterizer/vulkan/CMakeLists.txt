@@ -160,9 +160,13 @@ _vulkan_add_slang_shader(selection_mask            selection_mask.slang)
 # coverage mask consumed by selection_mask in POLYGON_MASK mode.
 _vulkan_add_slang_shader(selection_polygon_rasterize selection_polygon_rasterize.slang)
 
-# alphablend_shader.slang → forward variants
-_vulkan_add_slang_shader(rasterize_forward         alphablend_shader.slang EXPORT_MODE=0)
-_vulkan_add_slang_shader(rasterize_forward_3dgut   alphablend_shader.slang EXPORT_MODE=0 LFS_3DGUT_RASTERIZE=1)
+# alphablend_shader.slang → forward variants. The *_plain variants strip the
+# editor overlay/selection path from the per-pixel inner loop; the host selects
+# them whenever no overlay is active (the common viewing case).
+_vulkan_add_slang_shader(rasterize_forward               alphablend_shader.slang EXPORT_MODE=0)
+_vulkan_add_slang_shader(rasterize_forward_3dgut         alphablend_shader.slang EXPORT_MODE=0 LFS_3DGUT_RASTERIZE=1)
+_vulkan_add_slang_shader(rasterize_forward_plain         alphablend_shader.slang EXPORT_MODE=0 LFS_RASTER_OVERLAYS=0)
+_vulkan_add_slang_shader(rasterize_forward_3dgut_plain   alphablend_shader.slang EXPORT_MODE=0 LFS_3DGUT_RASTERIZE=1 LFS_RASTER_OVERLAYS=0)
 
 # Radix sort GLSL .comp
 _vulkan_add_glsl_shader(upsweep    upsweep.comp)

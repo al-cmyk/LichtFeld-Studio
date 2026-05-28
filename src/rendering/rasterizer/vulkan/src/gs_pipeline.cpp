@@ -45,6 +45,12 @@ namespace {
         if (name == "rasterize_forward_3dgut") {
             return "rasterize_forward/3dgut";
         }
+        if (name == "rasterize_forward_plain") {
+            return "rasterize_forward/standard_plain";
+        }
+        if (name == "rasterize_forward_3dgut_plain") {
+            return "rasterize_forward/3dgut_plain";
+        }
         constexpr std::string_view cumsum_prefix = "cumsum_";
         if (name.rfind(cumsum_prefix, 0) == 0) {
             return "cumsum/" + name.substr(cumsum_prefix.size());
