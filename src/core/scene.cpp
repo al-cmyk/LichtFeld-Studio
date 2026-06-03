@@ -570,6 +570,35 @@ namespace lfs::core {
         return visible;
     }
 
+    std::vector<Scene::VisibleSplatNodeSlot> Scene::getVisibleSplatNodeSlots() const {
+        std::vector<VisibleSplatNodeSlot> visible;
+
+        if (consolidated_ && !consolidated_node_ids_.empty()) {
+            visible.reserve(consolidated_node_ids_.size());
+            for (size_t slot_index = 0; slot_index < consolidated_node_ids_.size(); ++slot_index) {
+                const auto* node = getNodeById(consolidated_node_ids_[slot_index]);
+                if (!node || node->type != NodeType::SPLAT ||
+                    node->gaussian_count.load(std::memory_order_acquire) == 0 ||
+                    !isNodeEffectivelyVisible(node->id)) {
+                    continue;
+                }
+                visible.push_back({.node = node, .slot_index = slot_index});
+            }
+            return visible;
+        }
+
+        size_t slot_index = 0;
+        for (const auto& node : nodes_) {
+            if (node->type != NodeType::SPLAT || !node->model ||
+                !isNodeEffectivelyVisible(node->id)) {
+                continue;
+            }
+            visible.push_back({.node = node.get(), .slot_index = slot_index});
+            ++slot_index;
+        }
+        return visible;
+    }
+
     std::vector<std::shared_ptr<const lfs::core::Camera>> Scene::getVisibleCameras() const {
         std::vector<std::shared_ptr<const lfs::core::Camera>> result;
         for (const auto& node : nodes_) {
