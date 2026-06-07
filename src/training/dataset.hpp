@@ -151,9 +151,9 @@ namespace lfs::training {
     /// Dataset example type
     struct CameraExample {
         CameraWithImage data;
-        lfs::core::Tensor target;                       // Empty tensor, not used
-        std::optional<lfs::core::Tensor> mask = {};      // Optional mask [H,W], float32
-        std::optional<lfs::core::Tensor> depth = {};     // Optional depth [H,W], float32
+        lfs::core::Tensor target;                    // Empty tensor, not used
+        std::optional<lfs::core::Tensor> mask = {};  // Optional mask [H,W], float32
+        std::optional<lfs::core::Tensor> depth = {}; // Optional depth [H,W], float32
     };
 
     /// Camera dataset configuration

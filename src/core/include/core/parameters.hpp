@@ -127,8 +127,8 @@ namespace lfs::core {
             bool use_alpha_as_mask = true;            // Auto-use alpha channel from RGBA images as mask
 
             // Depth supervision
-            bool use_depth_loss = false;                   // Use dataset depth maps when available
-            float depth_loss_weight = 2.0f;                 // Depth supervision weight
+            bool use_depth_loss = false;                        // Use dataset depth maps when available
+            float depth_loss_weight = 2.0f;                     // Depth supervision weight
             std::string depth_loss_mode = "adaptive-warped-l1"; // pearson or adaptive-warped-l1
 
             // Mip filter (anti-aliasing)
