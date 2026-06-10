@@ -11,6 +11,7 @@
 #include "core/path_utils.hpp"
 #include "core/tensor.hpp"
 #include "core/tensor/internal/cuda_stream_context.hpp"
+#include "core/tensor/internal/memory_pool.hpp"
 #include "diagnostics/vram_profiler.hpp"
 #include "io/formats/rad.hpp"
 #include "rendering/coordinate_conventions.hpp"
@@ -1578,6 +1579,12 @@ namespace lfs::vis {
         }
         releaseSharedScratchArena();
         drainRetiredScratchBuffers(true);
+        if (render_stream_) {
+            cudaStreamSynchronize(render_stream_);
+            lfs::core::CudaMemoryPool::instance().release_stream(render_stream_);
+            cudaStreamDestroy(render_stream_);
+            render_stream_ = nullptr;
+        }
         // Detach our managed VkBuffers from buffers_ before the renderer's
         // cleanupBuffers runs so it does not vkDestroyBuffer them out from
         // under us.
@@ -2332,8 +2339,10 @@ namespace lfs::vis {
                 ? &splat_data.lod_tree->rad_source
                 : nullptr;
         if (rad_source != nullptr) {
-            const cudaStream_t stream =
-                splat_data.means_raw().is_valid() ? splat_data.means_raw().stream() : nullptr;
+            const cudaStream_t stream = render_stream_;
+            if (splat_data.means_raw().is_valid()) {
+                splat_data.means_raw().sync_to_stream(stream);
+            }
             const std::uint32_t dst_rest = std::min<std::uint32_t>(
                 static_cast<std::uint32_t>(splat_data.max_sh_coeffs_rest()),
                 lfs::core::sh_rest_coefficients_for_degree(lod_page_inputs_.input_sh_degree));
@@ -2549,7 +2558,7 @@ namespace lfs::vis {
             return std::unexpected(ok.error());
         }
 
-        const cudaStream_t stream = means.stream();
+        const cudaStream_t stream = render_stream_;
         if (auto ok = waitForSplatInputStreams(stream, splat_data); !ok) {
             return std::unexpected(ok.error());
         }
@@ -3638,15 +3647,13 @@ namespace lfs::vis {
             }
         }
 
-        // Restore the original per-source stream pick. With the upload running
-        // on the current stream (NULL by default), legacy implicit-FIFO
-        // ordering already chains us correctly behind whichever stream wrote
-        // the foreign sources.
-        cudaStream_t stream = nullptr;
+        // Upload on the render stream; bridge from whichever stream wrote the
+        // overlay sources with explicit event edges.
+        const cudaStream_t stream = render_stream_;
         if (selection_enabled) {
-            stream = slot.selection_source.stream();
+            slot.selection_source.sync_to_stream(stream);
         } else if (preview_enabled) {
-            stream = slot.preview_source.stream();
+            slot.preview_source.sync_to_stream(stream);
         }
 
         {
@@ -3781,6 +3788,9 @@ namespace lfs::vis {
             return {};
         }
         try {
+            if (!render_stream_) {
+                cudaStreamCreateWithFlags(&render_stream_, cudaStreamNonBlocking);
+            }
             // Submit the splat dispatch chain on the dedicated async-compute queue
             // when the device exposes one (NVIDIA family 2, AMD family 1, etc.). The
             // existing per-frame timeline-semaphore wait that gates the swapchain pass
@@ -4213,7 +4223,7 @@ namespace lfs::vis {
                 update_input_metadata(input_snapshot_changed);
             }
 
-            const cudaStream_t stream = splat_data.means_raw().stream();
+            const cudaStream_t stream = render_stream_;
             {
                 LOG_TIMER("prepareInputs.wait_streams");
                 if (auto ok = waitForSplatInputStreams(stream, splat_data); !ok) {
@@ -5248,6 +5258,7 @@ namespace lfs::vis {
                 return std::unexpected(ok.error());
             }
         }
+        const lfs::core::CUDAStreamGuard stream_guard(render_stream_);
 
         std::size_t ring_slot = 0;
         {
@@ -5471,7 +5482,7 @@ namespace lfs::vis {
             }
         }
 
-        const cudaStream_t selection_query_stream = nullptr;
+        const cudaStream_t selection_query_stream = render_stream_;
         {
             LOG_TIMER("VksplatViewportRenderer::buildSelectionMask.upload");
             if (transform_indices_enabled && !slot.transform_indices_uploaded) {
@@ -5684,6 +5695,7 @@ namespace lfs::vis {
         if (!initialized_ || context_ != &context) {
             return std::unexpected("VkSplat selection overlay requested without reusable render state");
         }
+        const lfs::core::CUDAStreamGuard stream_guard(render_stream_);
 
         const std::size_t ring_slot = acquireRingSlot();
         if (auto ok = waitForRingSlot(ring_slot, "selection overlay"); !ok) {
@@ -5859,6 +5871,7 @@ namespace lfs::vis {
         if (auto ok = ensureInitialized(context); !ok) {
             return std::unexpected(ok.error());
         }
+        const lfs::core::CUDAStreamGuard stream_guard(render_stream_);
 
         drainRetiredScratchBuffers(false);
 

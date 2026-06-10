@@ -632,6 +632,13 @@ namespace lfs::vis {
         }
         initialized_ = true;
 
+        // Tensor ops in the frame (render-state consolidation, interop copies)
+        // follow the viewport's render stream once it exists.
+        std::optional<lfs::core::CUDAStreamGuard> frame_stream_guard;
+        if (vksplat_viewport_renderer_ && vksplat_viewport_renderer_->renderStream()) {
+            frame_stream_guard.emplace(vksplat_viewport_renderer_->renderStream());
+        }
+
         const auto ensure_auxiliary_rendering_engine =
             [this]() -> std::expected<lfs::rendering::RenderingEngine*, std::string> {
             if (!engine_) {

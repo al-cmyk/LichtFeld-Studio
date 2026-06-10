@@ -121,6 +121,12 @@ namespace lfs::vis {
             const lfs::rendering::ViewportRenderRequest& request,
             OutputSlot output_slot = OutputSlot::Main,
             bool synchronize_input_read = false);
+        // Dedicated non-blocking CUDA stream for the render path (input
+        // packing, overlay staging, selection queries). Producer tensors
+        // bridge in with event edges; upload-timeline signals are enqueued on
+        // it so Vulkan's waits cover the packing.
+        [[nodiscard]] cudaStream_t renderStream() const { return render_stream_; }
+
         [[nodiscard]] bool nextOutputImagesNeedResize(
             glm::ivec2 size,
             OutputSlot output_slot = OutputSlot::Main) const;
@@ -503,6 +509,8 @@ namespace lfs::vis {
         std::array<UploadTimeline, kInputRingSize> upload_timelines_{};
         std::array<UploadTimeline, kInputRingSize> overlay_upload_timelines_{};
         UploadTimeline selection_query_timeline_{};
+
+        cudaStream_t render_stream_ = nullptr;
     };
 
 } // namespace lfs::vis
