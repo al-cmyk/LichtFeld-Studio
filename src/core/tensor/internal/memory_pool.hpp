@@ -6,6 +6,7 @@
 #include "allocation_profiler.hpp"
 #include "core/export.hpp"
 #include "core/logger.hpp"
+#include "core/pinned_memory_allocator.hpp"
 #include "cuda_event_pool.hpp"
 #include "deferred_free_queue.hpp"
 #include "diagnostics/vram_profiler.hpp"
@@ -181,6 +182,7 @@ namespace lfs::core {
             }
             GPUSlabAllocator::instance().merge_stream_into_virgin(stream);
             SizeBucketedPool::instance().retag_stream(stream, nullptr);
+            PinnedMemoryAllocator::instance().release_stream(stream);
         }
 
         // Moves `ptr`'s home to `stream` (declarative re-homing for tensors whose

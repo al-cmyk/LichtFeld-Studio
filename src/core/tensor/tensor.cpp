@@ -3,6 +3,7 @@
 
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
+#include "core/pinned_memory_allocator.hpp"
 #include "core/tensor_trace.hpp"
 #include "internal/cuda_stream_context.hpp"
 #include "internal/lazy_executor.hpp"
@@ -592,8 +593,13 @@ namespace lfs::core {
     }
 
     void Tensor::record_stream(cudaStream_t stream) const {
-        if (device_ == Device::CUDA && data_owner_) {
+        if (!data_owner_) {
+            return;
+        }
+        if (device_ == Device::CUDA) {
             CudaMemoryPool::instance().record_stream(data_owner_.get(), stream);
+        } else {
+            PinnedMemoryAllocator::instance().record_stream(data_owner_.get(), stream);
         }
     }
 

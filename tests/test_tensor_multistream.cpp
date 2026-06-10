@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include <atomic>
+#include <cstring>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 #include <thread>
@@ -219,6 +220,50 @@ TEST_F(TensorMultiStreamTest, RecordStreamBridgesReaderIntoFree) {
     }
     cudaFree(staging);
     destroyStreamSafely(owner);
+}
+
+TEST_F(TensorMultiStreamTest, PinnedBlockReusedOnlyAfterAllStreamsDone) {
+    GateStream h2d_stream;
+    cudaStream_t d2h_stream;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&d2h_stream, cudaStreamNonBlocking), cudaSuccess);
+
+    auto& pinned = PinnedMemoryAllocator::instance();
+    constexpr size_t kBytes = 1 * 1024 * 1024;
+
+    void* host_block = pinned.allocate(kBytes);
+    ASSERT_NE(host_block, nullptr);
+    std::memset(host_block, 0xEE, kBytes);
+
+    void* device_buffer = nullptr;
+    ASSERT_EQ(cudaMalloc(&device_buffer, kBytes), cudaSuccess);
+
+    h2d_stream.close();
+    ASSERT_EQ(cudaMemcpyAsync(device_buffer, host_block, kBytes, cudaMemcpyHostToDevice, h2d_stream.get()),
+              cudaSuccess);
+    ASSERT_EQ(cudaMemcpyAsync(host_block, device_buffer, kBytes, cudaMemcpyDeviceToHost, d2h_stream),
+              cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(d2h_stream), cudaSuccess);
+
+    pinned.record_stream(host_block, h2d_stream.get());
+    pinned.deallocate(host_block, d2h_stream);
+
+    // The gated H2D copy is still pending, so the block must not be handed out.
+    void* reused = pinned.allocate(kBytes);
+    ASSERT_NE(reused, nullptr);
+    EXPECT_NE(reused, host_block);
+
+    h2d_stream.release();
+    ASSERT_EQ(cudaStreamSynchronize(h2d_stream.get()), cudaSuccess);
+
+    // All recorded uses complete — now the cached block is reusable.
+    void* reused_after = pinned.allocate(kBytes);
+    ASSERT_NE(reused_after, nullptr);
+    EXPECT_EQ(reused_after, host_block);
+
+    pinned.deallocate(reused, nullptr);
+    pinned.deallocate(reused_after, nullptr);
+    cudaFree(device_buffer);
+    destroyStreamSafely(d2h_stream);
 }
 
 TEST_F(TensorMultiStreamTest, MultiThreadMultiStreamHammer) {
