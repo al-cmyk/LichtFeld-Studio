@@ -315,7 +315,8 @@ namespace lfs::core {
             out_det = det3(cov);
         }
 
-        [[nodiscard]] BhattLodWorkset make_workset_from_splatdata(const SplatData& input) {
+        [[nodiscard]] BhattLodWorkset make_workset_from_splatdata(const SplatData& input,
+                                                                  const bool input_lod_opacity) {
             const auto t0 = std::chrono::high_resolution_clock::now();
 
             const auto means_cpu = input.means_raw().cpu().contiguous();
@@ -419,7 +420,9 @@ namespace lfs::core {
                                           qy *= inv_q;
                                           qz *= inv_q;
 
-                                          const float op = sigmoid(opacity_ptr[i]);
+                                          const float op = input_lod_opacity
+                                                               ? std::max(opacity_ptr[i], 0.0f)
+                                                               : sigmoid(opacity_ptr[i]);
 
                                           const float r_ = 0.5f + SH_C0 * sh0_ptr[i3 + 0];
                                           const float g_ = 0.5f + SH_C0 * sh0_ptr[i3 + 1];
@@ -949,8 +952,16 @@ namespace lfs::core {
     // Main entry point
     std::expected<std::unique_ptr<SplatData>, std::string> build_bhatt_lod(
         const SplatData& input,
-        float lod_base,
+        const float lod_base,
         SplatSimplifyProgressCallback progress) {
+        return build_bhatt_lod(input, BhattLodBuildOptions{.lod_base = lod_base}, std::move(progress));
+    }
+
+    std::expected<std::unique_ptr<SplatData>, std::string> build_bhatt_lod(
+        const SplatData& input,
+        const BhattLodBuildOptions& options,
+        SplatSimplifyProgressCallback progress) {
+        const float lod_base = options.lod_base;
         try {
             const auto t_total_start = std::chrono::high_resolution_clock::now();
             LOG_DEBUG("build_bhatt_lod: starting, input_count={}, lod_base={}", input.size(), lod_base);
@@ -960,7 +971,7 @@ namespace lfs::core {
             }
 
             const auto t_workset_start = std::chrono::high_resolution_clock::now();
-            auto workset = make_workset_from_splatdata(input);
+            auto workset = make_workset_from_splatdata(input, options.input_lod_opacity);
             const auto t_workset_end = std::chrono::high_resolution_clock::now();
             const auto workset_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_workset_end - t_workset_start).count();
             LOG_DEBUG("build_bhatt_lod: workset creation took {} ms, visible_count={}", workset_ms, workset.current_count);
@@ -1303,6 +1314,15 @@ namespace lfs::core {
 
             // Step 3: Build SplatData
             const size_t output_count = old_indices.size();
+            if (options.leaf_input_indices != nullptr) {
+                auto& leaf_map = *options.leaf_input_indices;
+                leaf_map.assign(output_count, std::numeric_limits<uint32_t>::max());
+                for (size_t i = 0; i < output_count; ++i) {
+                    if (old_indices[i] < workset.initial_count) {
+                        leaf_map[i] = old_indices[i];
+                    }
+                }
+            }
             const int max_sh = input.get_max_sh_degree();
             const int shN_coeffs = static_cast<int>(input.max_sh_coeffs_rest());
 

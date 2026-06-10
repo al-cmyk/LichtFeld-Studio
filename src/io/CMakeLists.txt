@@ -147,6 +147,7 @@ add_library(lfs_io STATIC
         formats/html_viewer_resources.hpp
         formats/rad.hpp
         formats/rad.cpp
+        ply_to_rad_lod.cpp
         formats/spz.hpp
         formats/spz.cpp
         formats/usd.hpp

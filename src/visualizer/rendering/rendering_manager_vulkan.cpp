@@ -1784,8 +1784,13 @@ namespace lfs::vis {
                             const auto budget_capacity = static_cast<std::size_t>(
                                 std::ceil(static_cast<double>(effective_lod_budget) *
                                           kGpuLodRenderCapacityOverhead));
+                            // Out-of-core RAD models keep only a coarse prefix in
+                            // model->size(); the GPU cut selects logical tree nodes.
+                            const std::size_t capacity_limit = std::max<std::size_t>(
+                                model->size(),
+                                model->lod_tree ? model->lod_tree->total_nodes() : 0u);
                             lod_gpu_traversal->output_capacity =
-                                std::clamp<std::size_t>(budget_capacity, 1u, model->size());
+                                std::clamp<std::size_t>(budget_capacity, 1u, capacity_limit);
                             request.lod_gpu_traversal = *lod_gpu_traversal;
                         }
                     }

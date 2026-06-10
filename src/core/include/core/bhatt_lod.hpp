@@ -77,12 +77,29 @@ namespace lfs::core {
         float similarity(size_t a, size_t b) const;
     };
 
+    struct BhattLodBuildOptions {
+        // Pruning aggressiveness (SparkJS default ~1.25).
+        float lod_base = 1.25f;
+        // Input opacity_raw already holds display-space alpha (Spark lodOpacity
+        // encoding, can exceed 1.0), e.g. when re-clustering previously merged
+        // LOD nodes. Skips the sigmoid activation in workset extraction.
+        bool input_lod_opacity = false;
+        // When set, receives one entry per output node: the visible-order input
+        // splat index for leaves, or UINT32_MAX for merged interior nodes.
+        std::vector<uint32_t>* leaf_input_indices = nullptr;
+    };
+
     // Build a hierarchical LOD tree using Bhattacharyya distance.
     // Returns a SplatData with a populated SplatLodTree (binary tree).
     // lod_base: controls pruning aggressiveness (SparkJS default ~1.25)
     LFS_CORE_API std::expected<std::unique_ptr<SplatData>, std::string> build_bhatt_lod(
         const SplatData& input,
         float lod_base = 1.25f,
+        SplatSimplifyProgressCallback progress = {});
+
+    LFS_CORE_API std::expected<std::unique_ptr<SplatData>, std::string> build_bhatt_lod(
+        const SplatData& input,
+        const BhattLodBuildOptions& options,
         SplatSimplifyProgressCallback progress = {});
 
 } // namespace lfs::core

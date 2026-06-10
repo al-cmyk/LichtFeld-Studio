@@ -68,7 +68,17 @@ namespace lfs::vis {
             const bool rad_backed = splat_data.lod_tree && splat_data.lod_tree->rad_source.valid();
             const bool host_resident_leaves =
                 rad_backed && splat_data.means_raw().device() != lfs::core::Device::CUDA;
+            const bool out_of_core =
+                rad_backed &&
+                splat_data.lod_tree->total_nodes() > static_cast<std::size_t>(splat_data.size());
             if (!host_resident_leaves || pool_budget_splats == 0) {
+                if (out_of_core) {
+                    // Only a coarse LOD prefix is host-resident; full page
+                    // residency cannot fit, so keep the pool bounded even with
+                    // LOD disabled.
+                    constexpr std::size_t kOutOfCoreFallbackPages = 256;
+                    return std::min(kOutOfCoreFallbackPages, logical_chunks);
+                }
                 // Models whose tensors already live in VRAM (non-RAD, or RAD
                 // fully migrated at load) gain nothing from a bounded pool —
                 // streaming would only add double residency. Budget 0 = full.
