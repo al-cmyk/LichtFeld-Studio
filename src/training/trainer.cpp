@@ -27,6 +27,7 @@
 #include "io/cuda/image_format_kernels.cuh"
 #include "io/exporter.hpp"
 #include "io/filesystem_utils.hpp"
+#include "kernels/image_kernels.hpp"
 #include "lfs/kernels/ssim.cuh"
 #include "losses/losses.hpp"
 #include "optimizer/adam_optimizer.hpp"
@@ -1655,6 +1656,11 @@ namespace lfs::training {
         for (auto& event : reader_done_events_) {
             cudaEventCreateWithFlags(&event, cudaEventDisableTiming);
         }
+        for (auto& slot : loss_slots_) {
+            slot.pinned = static_cast<float*>(
+                lfs::core::PinnedMemoryAllocator::instance().allocate(sizeof(float)));
+            cudaEventCreateWithFlags(&slot.done, cudaEventDisableTiming);
+        }
     }
 
     void Trainer::destroySyncPrimitives() {
@@ -1672,6 +1678,80 @@ namespace lfs::training {
                 event = nullptr;
             }
         }
+        for (auto& slot : loss_slots_) {
+            if (slot.done) {
+                cudaEventDestroy(slot.done);
+                slot.done = nullptr;
+            }
+            if (slot.pinned) {
+                lfs::core::PinnedMemoryAllocator::instance().deallocate(slot.pinned, nullptr);
+                slot.pinned = nullptr;
+            }
+            slot.in_flight = false;
+        }
+    }
+
+    void Trainer::submitLossReadback(const lfs::core::Tensor& total_loss, int iter) {
+        LossReadbackSlot& slot = loss_slots_[loss_slot_head_];
+        if (!slot.pinned || !slot.done) {
+            return;
+        }
+        if (slot.in_flight) {
+            // Ring full: the GPU is LOSS_RING submit intervals behind —
+            // explicit backpressure instead of silently dropping the sample.
+            // The caller harvests right before submitting, so this slot's
+            // value was already consumed once the event completes.
+            cudaEventSynchronize(slot.done);
+            slot.in_flight = false;
+        }
+        if (cudaMemcpyAsync(slot.pinned, total_loss.ptr<float>(), sizeof(float),
+                            cudaMemcpyDeviceToHost, training_stream_) != cudaSuccess) {
+            return;
+        }
+        if (cudaEventRecord(slot.done, training_stream_) == cudaSuccess) {
+            slot.iter = iter;
+            slot.in_flight = true;
+            loss_slot_head_ = (loss_slot_head_ + 1) % LOSS_RING;
+        }
+    }
+
+    std::expected<void, std::string> Trainer::harvestLossReadbacks(bool drain, bool in_controller_phase) {
+        for (size_t i = 0; i < LOSS_RING; ++i) {
+            LossReadbackSlot& slot = loss_slots_[(loss_slot_head_ + i) % LOSS_RING];
+            if (!slot.in_flight) {
+                continue;
+            }
+            if (drain) {
+                if (cudaEventSynchronize(slot.done) != cudaSuccess) {
+                    slot.in_flight = false;
+                    continue;
+                }
+            } else if (cudaEventQuery(slot.done) != cudaSuccess) {
+                break;
+            }
+            slot.in_flight = false;
+
+            const float loss_value = *slot.pinned;
+            if (std::isnan(loss_value) || std::isinf(loss_value)) {
+                return std::unexpected(std::format("NaN/Inf loss at iteration {}", slot.iter));
+            }
+
+            current_loss_ = loss_value;
+            if (progress_) {
+                progress_->update(
+                    slot.iter,
+                    loss_value,
+                    static_cast<int>(strategy_->get_model().size()),
+                    get_progress_phase(slot.iter, in_controller_phase));
+            }
+            lfs::core::events::state::TrainingProgress{
+                .iteration = slot.iter,
+                .loss = loss_value,
+                .num_gaussians = static_cast<int>(strategy_->get_model().size()),
+                .is_refining = strategy_->is_refining(slot.iter)}
+                .emit();
+        }
+        return {};
     }
 
     void Trainer::beginModelRead(cudaStream_t reader_stream) {
@@ -3695,9 +3775,10 @@ namespace lfs::training {
                     if (tile_error_map.is_valid() && core::param::is_mrnf_strategy(params_.optimization.strategy)) {
                         LFS_VRAM_SCOPE("train.densification_error_map");
                         LOG_VRAM_DIFF("train.densification_error_map.normalize");
-                        const float map_mean = tile_error_map.mean().item();
-                        if (map_mean > 1e-6f)
-                            tile_error_map.div_(map_mean);
+                        const auto map_mean = tile_error_map.mean();
+                        lfs::training::kernels::launch_normalize_by_device_scalar(
+                            tile_error_map.ptr<float>(), tile_error_map.numel(),
+                            map_mean.ptr<float>(), 1e-6f);
                     }
 
                     if (live_vram_profiler_enabled()) {
@@ -4009,34 +4090,18 @@ namespace lfs::training {
                 }
             }
 
-            // Sync loss to CPU only at intervals - single sync point
+            // Loss readback at intervals, async: enqueue the D2H into the
+            // pinned ring and report harvested samples from earlier iterations
+            // — no pipeline stall.
             constexpr int LOSS_SYNC_INTERVAL = 10;
-            float loss_value = 0.0f;
             if (iter % LOSS_SYNC_INTERVAL == 0 || iter == 1) {
-                // Accumulate on GPU then sync once
-                auto total_loss = sparsity_loss_gpu.numel() > 0
-                                      ? (loss_tensor_gpu + sparsity_loss_gpu)
-                                      : loss_tensor_gpu;
-                loss_value = total_loss.item<float>();
-
-                if (std::isnan(loss_value) || std::isinf(loss_value)) {
-                    return std::unexpected(std::format("NaN/Inf loss at iteration {}", iter));
+                lfs::core::Tensor total_loss = sparsity_loss_gpu.numel() > 0
+                                                   ? (loss_tensor_gpu + sparsity_loss_gpu)
+                                                   : loss_tensor_gpu;
+                if (auto harvested = harvestLossReadbacks(false, in_controller_phase); !harvested) {
+                    return std::unexpected(harvested.error());
                 }
-
-                current_loss_ = loss_value;
-                if (progress_) {
-                    progress_->update(
-                        iter,
-                        loss_value,
-                        static_cast<int>(strategy_->get_model().size()),
-                        get_progress_phase(iter, in_controller_phase));
-                }
-                lfs::core::events::state::TrainingProgress{
-                    .iteration = iter,
-                    .loss = loss_value,
-                    .num_gaussians = static_cast<int>(strategy_->get_model().size()),
-                    .is_refining = strategy_->is_refining(iter)}
-                    .emit();
+                submitLossReadback(total_loss, iter);
             }
 
             if (!in_sparsification && !fastgs_strategy_hooks_at_start) {
@@ -4434,6 +4499,12 @@ namespace lfs::training {
                         cudaDeviceSynchronize();
                         cudaGetLastError();
 
+                        // Device is drained — consume completed loss readbacks
+                        // before the retry resubmits into the ring.
+                        if (auto harvested = harvestLossReadbacks(true, false); !harvested) {
+                            return std::unexpected(harvested.error());
+                        }
+
                         lfs::core::GlobalArenaManager::instance().get_arena().full_reset();
                         lfs::core::Tensor::trim_memory_pool();
 
@@ -4497,6 +4568,10 @@ namespace lfs::training {
             }
 
             maybe_publish_camera_loss_heatmap(current_iteration_.load(), true);
+
+            if (auto harvested = harvestLossReadbacks(true, false); !harvested) {
+                return std::unexpected(harvested.error());
+            }
 
             if (progress_) {
                 progress_->complete();

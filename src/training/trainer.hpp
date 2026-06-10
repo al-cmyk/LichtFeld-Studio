@@ -536,6 +536,23 @@ namespace lfs::training {
         void recordParamsReady();
         void waitForModelReaders();
 
+        // Async loss readback: the periodic loss sample is copied D2H into a
+        // small pinned ring and polled on later iterations instead of stalling
+        // the pipeline with .item(). NaN/Inf detection lags by at most
+        // LOSS_RING * LOSS_SYNC_INTERVAL iterations.
+        static constexpr size_t LOSS_RING = 4;
+        struct LossReadbackSlot {
+            float* pinned = nullptr;
+            cudaEvent_t done = nullptr;
+            int iter = 0;
+            bool in_flight = false;
+        };
+        std::array<LossReadbackSlot, LOSS_RING> loss_slots_{};
+        size_t loss_slot_head_ = 0;
+
+        void submitLossReadback(const lfs::core::Tensor& total_loss, int iter);
+        std::expected<void, std::string> harvestLossReadbacks(bool drain, bool in_controller_phase);
+
         // Python control scripts (file paths) to execute before training starts
         std::vector<std::filesystem::path> python_scripts_;
 
