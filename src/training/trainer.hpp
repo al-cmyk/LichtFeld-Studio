@@ -513,6 +513,12 @@ namespace lfs::training {
         // training on the legacy default stream.
         cudaStream_t training_stream_ = nullptr;
 
+        // Non-blocking stream for on-demand GUI metric renders
+        // (computeCameraMetrics, called from the UI thread). Lets PSNR/SSIM
+        // tensor work overlap training and keeps the metric render's arena
+        // frame off a device-sync fallback.
+        cudaStream_t metrics_stream_ = nullptr;
+
         // Trainer↔viewer GPU handshake. Forward edge: params_ready_event_ marks
         // a consistent end-of-step parameter state; readers wait on it before
         // enqueuing reads (beginModelRead). Reverse edges: reader_done ring

@@ -142,8 +142,28 @@ namespace lfs::core {
         return false;
     }
 
+    namespace {
+        // Per-thread cap on wait-forever begin_frame(); 0 = block forever.
+        thread_local uint32_t tl_begin_frame_timeout_ms = 0;
+    } // namespace
+
+    RasterizerMemoryArena::ScopedBeginFrameTimeout::ScopedBeginFrameTimeout(uint32_t timeout_ms)
+        : previous_(tl_begin_frame_timeout_ms) {
+        tl_begin_frame_timeout_ms = timeout_ms;
+    }
+
+    RasterizerMemoryArena::ScopedBeginFrameTimeout::~ScopedBeginFrameTimeout() {
+        tl_begin_frame_timeout_ms = previous_;
+    }
+
     uint64_t RasterizerMemoryArena::begin_frame(cudaStream_t stream, bool from_rendering) {
-        auto frame_id = begin_frame_impl(stream, from_rendering, 0u);
+        // A thread that opted into bounded acquisition (GUI metric render) gets
+        // a timed wait instead of waiting forever, so it can't deadlock holding
+        // render_mutex_ against a refining trainer that holds the arena frame.
+        const std::optional<uint32_t> wait =
+            tl_begin_frame_timeout_ms > 0 ? std::optional<uint32_t>(tl_begin_frame_timeout_ms)
+                                          : std::optional<uint32_t>(0u);
+        auto frame_id = begin_frame_impl(stream, from_rendering, wait);
         if (!frame_id) {
             throw std::runtime_error("RasterizerMemoryArena::begin_frame failed to acquire arena frame");
         }

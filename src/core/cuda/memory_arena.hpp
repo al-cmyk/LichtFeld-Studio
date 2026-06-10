@@ -204,6 +204,23 @@ namespace lfs::core {
         // stream ahead of its device sync on the streamless path).
         void note_external_release(cudaExternalSemaphore_t semaphore, uint64_t value);
 
+        // Caps wait-forever begin_frame() on the CURRENT thread to a bounded
+        // wait for its scope — so a cross-thread reader (GUI metric render) that
+        // holds render_mutex_ can't deadlock against a refining trainer that
+        // holds the arena frame and wants the exclusive lock: the reader's
+        // begin_frame bails (throws), the metric is skipped, the lock releases.
+        // Training threads never set this, so their acquisition stays blocking.
+        class ScopedBeginFrameTimeout {
+        public:
+            explicit ScopedBeginFrameTimeout(uint32_t timeout_ms);
+            ~ScopedBeginFrameTimeout();
+            ScopedBeginFrameTimeout(const ScopedBeginFrameTimeout&) = delete;
+            ScopedBeginFrameTimeout& operator=(const ScopedBeginFrameTimeout&) = delete;
+
+        private:
+            uint32_t previous_ = 0;
+        };
+
         std::function<char*(size_t)> get_allocator(uint64_t frame_id);
         std::vector<BufferHandle> get_frame_buffers(uint64_t frame_id) const;
         void reset_frame(uint64_t frame_id); // Keeps allocation, resets offset

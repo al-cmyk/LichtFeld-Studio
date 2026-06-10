@@ -1619,8 +1619,10 @@ namespace lfs::training {
         // ordered against training kernels. Overlap partners (loader decode,
         // viewer render) use non-blocking streams with explicit event edges.
         cudaStreamCreate(&training_stream_);
+        cudaStreamCreateWithFlags(&metrics_stream_, cudaStreamNonBlocking);
         nvtxNameCudaStreamA(training_stream_, "lfs.train");
         nvtxNameCudaStreamA(callback_stream_, "lfs.train.callback");
+        nvtxNameCudaStreamA(metrics_stream_, "lfs.metrics");
         createSyncPrimitives();
 
         LOG_DEBUG("Trainer constructed with {} cameras", base_dataset_->get_cameras().size());
@@ -1640,8 +1642,10 @@ namespace lfs::training {
         // ordered against training kernels. Overlap partners (loader decode,
         // viewer render) use non-blocking streams with explicit event edges.
         cudaStreamCreate(&training_stream_);
+        cudaStreamCreateWithFlags(&metrics_stream_, cudaStreamNonBlocking);
         nvtxNameCudaStreamA(training_stream_, "lfs.train");
         nvtxNameCudaStreamA(callback_stream_, "lfs.train.callback");
+        nvtxNameCudaStreamA(metrics_stream_, "lfs.metrics");
         createSyncPrimitives();
 
         if (!scene.hasTrainingData()) {
@@ -2573,28 +2577,46 @@ namespace lfs::training {
         lfs::core::Tensor rendered;
         {
             const std::shared_lock lock(render_mutex_);
-            const cudaStream_t reader_stream = lfs::core::getCurrentCUDAStream();
+            // Run the metric render on the dedicated metrics stream (its kernels
+            // and tensor ops overlap training; item() readbacks drain it). Cap
+            // arena acquisition so a refining iteration holding the arena can't
+            // deadlock this reader (which holds render_mutex_ shared) — on
+            // timeout the rasterizer throws and the metric is skipped this call.
+            const cudaStream_t reader_stream = metrics_stream_ ? metrics_stream_
+                                                               : lfs::core::getCurrentCUDAStream();
+            std::optional<lfs::core::CUDAStreamGuard> metrics_guard;
+            if (metrics_stream_) {
+                metrics_guard.emplace(metrics_stream_);
+            }
+            const lfs::core::RasterizerMemoryArena::ScopedBeginFrameTimeout arena_timeout(100);
             beginModelRead(reader_stream);
 
             auto& model = strategy_->get_model();
             auto& background = background_;
 
-            RenderOutput output;
-            if (params_.optimization.gut) {
-                output = gsplat_rasterize(
-                    camera, model, background,
-                    1.0f, false, GsplatRenderMode::RGB, true);
-            } else {
-                output = fast_rasterize(
-                    camera, model, background, params_.optimization.mip_filter);
-            }
+            try {
+                RenderOutput output;
+                if (params_.optimization.gut) {
+                    output = gsplat_rasterize(
+                        camera, model, background,
+                        1.0f, false, GsplatRenderMode::RGB, true);
+                } else {
+                    output = fast_rasterize(
+                        camera, model, background, params_.optimization.mip_filter);
+                }
 
-            rendered = output.image;
-            if (appearance.enabled) {
-                rendered = applyPPISPForViewport(
-                    rendered, camera.uid(), appearance.overrides, appearance.use_controller);
+                rendered = output.image;
+                if (appearance.enabled) {
+                    rendered = applyPPISPForViewport(
+                        rendered, camera.uid(), appearance.overrides, appearance.use_controller);
+                }
+                rendered = rendered.clamp(0.0f, 1.0f);
+            } catch (const std::exception& e) {
+                // Arena busy (refining trainer holds the frame) or render error:
+                // skip this metric sample; the panel retries on its next update.
+                endModelRead(reader_stream);
+                return std::unexpected(std::format("metric render unavailable: {}", e.what()));
             }
-            rendered = rendered.clamp(0.0f, 1.0f);
             endModelRead(reader_stream);
         }
 
@@ -2667,6 +2689,13 @@ namespace lfs::training {
             callback_stream_ = nullptr;
         }
         callback_busy_ = false;
+
+        if (metrics_stream_) {
+            cudaStreamSynchronize(metrics_stream_);
+            lfs::core::CudaMemoryPool::instance().release_stream(metrics_stream_);
+            cudaStreamDestroy(metrics_stream_);
+            metrics_stream_ = nullptr;
+        }
 
         if (training_stream_) {
             cudaStreamSynchronize(training_stream_);
@@ -3164,8 +3193,15 @@ namespace lfs::training {
                 // first step's output, which this write-lock — taken before that step —
                 // blocks. See trainer.cpp step() lock below; both must be gated.
                 std::unique_lock<std::shared_mutex> lock(render_mutex_, std::defer_lock);
-                if (strategy_->is_refining(iter))
+                if (strategy_->is_refining(iter)) {
                     lock.lock();
+                    // Reallocation ahead: order the trainer stream after any
+                    // in-flight model-read GPU work whose done-event is still
+                    // pending (a metric render that finished CPU-side between
+                    // the step-top drain and now). The exclusive lock guarantees
+                    // no new reader starts.
+                    waitForModelReaders();
+                }
                 auto& model = strategy_->get_model();
                 const size_t model_size_before = static_cast<size_t>(model.size());
                 strategy_->post_backward(iter, r_output);
@@ -4130,8 +4166,12 @@ namespace lfs::training {
                     // the interop semaphore (the render waits for the step's signal before
                     // reading), so the CPU write-lock is needed only for reallocation.
                     std::unique_lock<std::shared_mutex> lock(render_mutex_, std::defer_lock);
-                    if (strategy_->is_refining(iter))
+                    if (strategy_->is_refining(iter)) {
                         lock.lock();
+                        // See post_backward lock above: drain in-flight reader
+                        // events before grow/prune reallocates model tensors.
+                        waitForModelReaders();
+                    }
                     LFS_VRAM_SCOPE("train.optimizer.strategy_step");
                     LOG_VRAM_DIFF("train.optimizer.strategy_step");
                     auto& model = strategy_->get_model();
