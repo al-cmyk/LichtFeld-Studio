@@ -40,6 +40,15 @@ namespace lfs::core {
     RasterizerMemoryArena::~RasterizerMemoryArena() {
         dump_statistics();
 
+        {
+            std::lock_guard<std::mutex> event_lock(last_frame_event_mutex_);
+            if (last_frame_event_) {
+                cudaEventDestroy(last_frame_event_);
+                last_frame_event_ = nullptr;
+                last_frame_event_valid_ = false;
+            }
+        }
+
         std::lock_guard<std::mutex> lock(arena_mutex_);
         for (auto& [device, arena_ptr] : device_arenas_) {
             if (arena_ptr) {
@@ -53,7 +62,8 @@ namespace lfs::core {
     }
 
     RasterizerMemoryArena::RasterizerMemoryArena(RasterizerMemoryArena&& other) noexcept {
-        std::scoped_lock lock(other.arena_mutex_, other.frame_mutex_, other.sync_mutex_);
+        std::scoped_lock lock(other.arena_mutex_, other.frame_mutex_, other.sync_mutex_,
+                              other.last_frame_event_mutex_);
         device_arenas_ = std::move(other.device_arenas_);
         frame_contexts_ = std::move(other.frame_contexts_);
         config_ = other.config_;
@@ -64,6 +74,10 @@ namespace lfs::core {
         active_frames_ = other.active_frames_;
         pending_render_frames_ = other.pending_render_frames_;
         active_training_frames_ = other.active_training_frames_;
+        last_frame_event_ = other.last_frame_event_;
+        last_frame_event_valid_ = other.last_frame_event_valid_;
+        other.last_frame_event_ = nullptr;
+        other.last_frame_event_valid_ = false;
     }
 
     RasterizerMemoryArena& RasterizerMemoryArena::operator=(RasterizerMemoryArena&& other) noexcept {
@@ -74,7 +88,9 @@ namespace lfs::core {
                 frame_mutex_,
                 other.frame_mutex_,
                 sync_mutex_,
-                other.sync_mutex_);
+                other.sync_mutex_,
+                last_frame_event_mutex_,
+                other.last_frame_event_mutex_);
             device_arenas_ = std::move(other.device_arenas_);
             frame_contexts_ = std::move(other.frame_contexts_);
             config_ = other.config_;
@@ -85,6 +101,13 @@ namespace lfs::core {
             active_frames_ = other.active_frames_;
             pending_render_frames_ = other.pending_render_frames_;
             active_training_frames_ = other.active_training_frames_;
+            if (last_frame_event_) {
+                cudaEventDestroy(last_frame_event_);
+            }
+            last_frame_event_ = other.last_frame_event_;
+            last_frame_event_valid_ = other.last_frame_event_valid_;
+            other.last_frame_event_ = nullptr;
+            other.last_frame_event_valid_ = false;
         }
         return *this;
     }
@@ -119,19 +142,39 @@ namespace lfs::core {
         return false;
     }
 
-    uint64_t RasterizerMemoryArena::begin_frame(bool from_rendering) {
-        auto frame_id = begin_frame_impl(from_rendering, true);
+    uint64_t RasterizerMemoryArena::begin_frame(cudaStream_t stream, bool from_rendering) {
+        auto frame_id = begin_frame_impl(stream, from_rendering, true);
         if (!frame_id) {
             throw std::runtime_error("RasterizerMemoryArena::begin_frame failed to acquire arena frame");
         }
         return *frame_id;
     }
 
-    std::optional<uint64_t> RasterizerMemoryArena::try_begin_frame(bool from_rendering) {
-        return begin_frame_impl(from_rendering, false);
+    std::optional<uint64_t> RasterizerMemoryArena::try_begin_frame(cudaStream_t stream, bool from_rendering) {
+        return begin_frame_impl(stream, from_rendering, false);
     }
 
-    std::optional<uint64_t> RasterizerMemoryArena::begin_frame_impl(bool from_rendering, bool wait) {
+    // Orders the new frame's work after the previous frame before the arena
+    // offset resets and memory gets overwritten. Stream-aware frames chain via
+    // the completion event (GPU-side, no host stall); legacy frames or a broken
+    // chain fall back to a device-wide sync.
+    bool RasterizerMemoryArena::wait_for_previous_frame(cudaStream_t stream) {
+        static const bool legacy_sync = []() {
+            const char* env = std::getenv("LFS_ARENA_LEGACY_SYNC");
+            return env && env[0] == '1';
+        }();
+
+        if (stream && !legacy_sync) {
+            std::lock_guard<std::mutex> lock(last_frame_event_mutex_);
+            if (last_frame_event_valid_ &&
+                cudaStreamWaitEvent(stream, last_frame_event_, 0) == cudaSuccess) {
+                return true;
+            }
+        }
+        return cudaDeviceSynchronize() == cudaSuccess;
+    }
+
+    std::optional<uint64_t> RasterizerMemoryArena::begin_frame_impl(cudaStream_t stream, bool from_rendering, bool wait) {
         {
             std::unique_lock<std::mutex> sync_lock(sync_mutex_);
             const auto can_begin = [this, from_rendering]() {
@@ -150,10 +193,8 @@ namespace lfs::core {
 
         uint64_t frame_id = frame_counter_.fetch_add(1, std::memory_order_relaxed);
 
-        // Synchronize to ensure previous frame's GPU work is complete
-        // before we reset the arena offset and start overwriting memory
-        const cudaError_t sync_err = cudaDeviceSynchronize();
-        if (sync_err != cudaSuccess) {
+        if (!wait_for_previous_frame(stream)) {
+            const cudaError_t sync_err = cudaGetLastError();
             end_frame(frame_id, from_rendering);
             throw std::runtime_error("RasterizerMemoryArena::begin_frame failed while synchronizing prior GPU work: " +
                                      std::string(cudaGetErrorName(sync_err)) + ": " +
@@ -196,7 +237,25 @@ namespace lfs::core {
         return frame_id;
     }
 
-    void RasterizerMemoryArena::end_frame(uint64_t frame_id, bool from_rendering) {
+    void RasterizerMemoryArena::end_frame(uint64_t frame_id, cudaStream_t stream, bool from_rendering) {
+        // Record the frame's completion event before releasing frame ownership:
+        // once active_frames_ drops, the next begin_frame may chain on it. A
+        // frame ended without a stream breaks the chain (next begin device-syncs).
+        {
+            std::lock_guard<std::mutex> event_lock(last_frame_event_mutex_);
+            if (stream) {
+                if (!last_frame_event_) {
+                    if (cudaEventCreateWithFlags(&last_frame_event_, cudaEventDisableTiming) != cudaSuccess) {
+                        last_frame_event_ = nullptr;
+                    }
+                }
+                last_frame_event_valid_ =
+                    last_frame_event_ && cudaEventRecord(last_frame_event_, stream) == cudaSuccess;
+            } else {
+                last_frame_event_valid_ = false;
+            }
+        }
+
         // Track peak usage before resetting
         int device;
         cudaError_t err = cudaGetDevice(&device);

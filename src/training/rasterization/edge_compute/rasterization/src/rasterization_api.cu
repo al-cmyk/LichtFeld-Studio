@@ -4,6 +4,7 @@
 
 #include "buffer_utils.h"
 #include "core/cuda/memory_arena.hpp"
+#include "core/tensor/internal/cuda_stream_context.hpp"
 #include "cuda_utils.h"
 #include "edge_rasterization_api.h"
 #include "edge_rasterization_config.h"
@@ -53,7 +54,7 @@ namespace edge_compute::rasterization {
 
         // Get global arena and begin frame
         auto& arena = lfs::core::GlobalArenaManager::instance().get_arena();
-        uint64_t frame_id = arena.begin_frame();
+        uint64_t frame_id = arena.begin_frame(lfs::core::getCurrentCUDAStream());
 
         // Get arena allocator for this frame
         auto arena_allocator = arena.get_allocator(frame_id);

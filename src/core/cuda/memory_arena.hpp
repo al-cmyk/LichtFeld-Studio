@@ -143,6 +143,13 @@ namespace lfs::core {
         uint64_t pending_render_frames_ = 0;
         uint64_t active_training_frames_ = 0;
 
+        // Completion event of the most recent stream-aware frame. Invalid when
+        // the last frame was legacy (no stream) — the next begin then falls back
+        // to a device sync. Guarded by last_frame_event_mutex_.
+        std::mutex last_frame_event_mutex_;
+        cudaEvent_t last_frame_event_ = nullptr;
+        bool last_frame_event_valid_ = false;
+
     public:
         // Constructors
         RasterizerMemoryArena();
@@ -157,9 +164,18 @@ namespace lfs::core {
         RasterizerMemoryArena(RasterizerMemoryArena&&) noexcept;
         RasterizerMemoryArena& operator=(RasterizerMemoryArena&&) noexcept;
 
-        uint64_t begin_frame(bool from_rendering = false);
-        std::optional<uint64_t> try_begin_frame(bool from_rendering = false);
-        void end_frame(uint64_t frame_id, bool from_rendering = false);
+        // Stream-aware frames chain begin→end with a GPU event edge: begin_frame
+        // waits (on `stream`) for the previous frame's completion event instead of
+        // a device-wide sync, and end_frame records the event on `stream` — which
+        // must be the stream all of the frame's arena work was enqueued on. Frames
+        // without a stream keep the legacy cudaDeviceSynchronize and invalidate
+        // the chain. LFS_ARENA_LEGACY_SYNC=1 forces the legacy sync everywhere.
+        uint64_t begin_frame(bool from_rendering = false) { return begin_frame(nullptr, from_rendering); }
+        uint64_t begin_frame(cudaStream_t stream, bool from_rendering = false);
+        std::optional<uint64_t> try_begin_frame(bool from_rendering = false) { return try_begin_frame(nullptr, from_rendering); }
+        std::optional<uint64_t> try_begin_frame(cudaStream_t stream, bool from_rendering = false);
+        void end_frame(uint64_t frame_id, bool from_rendering = false) { end_frame(frame_id, nullptr, from_rendering); }
+        void end_frame(uint64_t frame_id, cudaStream_t stream, bool from_rendering = false);
         std::function<char*(size_t)> get_allocator(uint64_t frame_id);
         std::vector<BufferHandle> get_frame_buffers(uint64_t frame_id) const;
         void reset_frame(uint64_t frame_id); // Keeps allocation, resets offset
@@ -190,7 +206,8 @@ namespace lfs::core {
 
     private:
         Arena& get_or_create_arena(int device);
-        std::optional<uint64_t> begin_frame_impl(bool from_rendering, bool wait);
+        std::optional<uint64_t> begin_frame_impl(cudaStream_t stream, bool from_rendering, bool wait);
+        bool wait_for_previous_frame(cudaStream_t stream);
         bool install_external_backing_impl(ExternalBacking backing, bool wait);
         char* allocate_internal(Arena& arena, size_t size, uint64_t frame_id);
         void release_arena_storage(Arena& arena);

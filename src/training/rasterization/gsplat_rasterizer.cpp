@@ -5,6 +5,7 @@
 #include "gsplat_rasterizer.hpp"
 #include "core/cuda/memory_arena.hpp"
 #include "core/logger.hpp"
+#include "core/tensor/internal/cuda_stream_context.hpp"
 #include "gsplat/Ops.h"
 #include "training/kernels/grad_alpha.hpp"
 #include <array>
@@ -30,7 +31,7 @@ namespace lfs::training {
 
         // Begin arena frame for memory allocation
         auto& arena = core::GlobalArenaManager::instance().get_arena();
-        uint64_t frame_id = arena.begin_frame();
+        uint64_t frame_id = arena.begin_frame(core::getCurrentCUDAStream());
         auto arena_allocator = arena.get_allocator(frame_id);
         void* isect_ids_to_free = nullptr;
         void* flatten_ids_to_free = nullptr;
@@ -798,7 +799,7 @@ namespace lfs::training {
             }
 
             // End arena frame to release memory from forward pass
-            arena.end_frame(ctx.frame_id);
+            arena.end_frame(ctx.frame_id, core::getCurrentCUDAStream());
         } catch (...) {
             if (ctx.isect_ids_ptr != nullptr) {
                 cudaFree(ctx.isect_ids_ptr);

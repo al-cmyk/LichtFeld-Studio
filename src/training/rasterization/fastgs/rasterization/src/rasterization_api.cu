@@ -5,6 +5,7 @@
 #include "backward.h"
 #include "buffer_utils.h"
 #include "core/cuda/memory_arena.hpp"
+#include "core/tensor/internal/cuda_stream_context.hpp"
 #include "cuda_utils.h"
 #include "diagnostics/vram_profiler.hpp"
 #include "forward.h"
@@ -238,7 +239,7 @@ namespace fast_lfs::rasterization {
             // synchronizes prior arena users, so asynchronous CUDA failures are
             // attributed before the CUB workspace query below.
             arena = &lfs::core::GlobalArenaManager::instance().get_arena();
-            frame_id = arena->begin_frame();
+            frame_id = arena->begin_frame(lfs::core::getCurrentCUDAStream());
             frame_started = true;
 
             validate_fastgs_forward_cuda_preflight(
@@ -373,7 +374,7 @@ namespace fast_lfs::rasterization {
         }
         free_sorted_primitive_indices(forward_ctx.sorted_primitive_indices);
         auto& arena = lfs::core::GlobalArenaManager::instance().get_arena();
-        arena.end_frame(forward_ctx.frame_id);
+        arena.end_frame(forward_ctx.frame_id, lfs::core::getCurrentCUDAStream());
     }
 
     BackwardOutputs backward_raw(

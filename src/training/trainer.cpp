@@ -18,6 +18,7 @@
 #include "core/path_utils.hpp"
 #include "core/scene.hpp"
 #include "core/splat_data_transform.hpp"
+#include "core/tensor/internal/cuda_stream_context.hpp"
 #include "core/tensor/internal/gpu_slab_allocator.hpp"
 #include "core/tensor/internal/size_bucketed_pool.hpp"
 #include "diagnostics/vram_profiler.hpp"
@@ -3145,7 +3146,7 @@ namespace lfs::training {
                             cudaFree(gsplat_ctx->flatten_ids_ptr);
                             gsplat_ctx->flatten_ids_ptr = nullptr;
                         }
-                        arena.end_frame(gsplat_ctx->frame_id);
+                        arena.end_frame(gsplat_ctx->frame_id, lfs::core::getCurrentCUDAStream());
                         gsplat_ctx.reset();
                     }
                 };

@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/cuda/memory_arena.hpp"
 #include "core/tensor.hpp"
 #include "core/tensor/internal/cuda_event_pool.hpp"
 #include "core/tensor/internal/cuda_stream_context.hpp"
@@ -264,6 +265,51 @@ TEST_F(TensorMultiStreamTest, PinnedBlockReusedOnlyAfterAllStreamsDone) {
     pinned.deallocate(reused_after, nullptr);
     cudaFree(device_buffer);
     destroyStreamSafely(d2h_stream);
+}
+
+TEST_F(TensorMultiStreamTest, ArenaCrossStreamFrameHandoff) {
+    GateStream training;
+    cudaStream_t render;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&render, cudaStreamNonBlocking), cudaSuccess);
+
+    constexpr size_t kBytes = 1 * 1024 * 1024;
+    auto& arena = GlobalArenaManager::instance().get_arena();
+
+    // Training frame writes a pattern; the gate keeps the write pending past end_frame.
+    const uint64_t training_frame = arena.begin_frame(training.get(), false);
+    char* training_buf = arena.get_allocator(training_frame)(kBytes);
+    ASSERT_NE(training_buf, nullptr);
+
+    void* staging = nullptr;
+    ASSERT_EQ(cudaMalloc(&staging, kBytes), cudaSuccess);
+
+    training.close();
+    ASSERT_EQ(cudaMemsetAsync(training_buf, 0xAA, kBytes, training.get()), cudaSuccess);
+    ASSERT_EQ(cudaMemcpyAsync(staging, training_buf, kBytes, cudaMemcpyDeviceToDevice, training.get()),
+              cudaSuccess);
+    arena.end_frame(training_frame, training.get(), false);
+
+    // Render frame reuses the same arena range; its writes must be GPU-ordered
+    // after the still-pending training frame via the chained completion event.
+    const uint64_t render_frame = arena.begin_frame(render, true);
+    char* render_buf = arena.get_allocator(render_frame)(kBytes);
+    ASSERT_NE(render_buf, nullptr);
+    EXPECT_EQ(static_cast<void*>(render_buf), static_cast<void*>(training_buf));
+    ASSERT_EQ(cudaMemsetAsync(render_buf, 0xBB, kBytes, render), cudaSuccess);
+    arena.end_frame(render_frame, render, true);
+
+    training.release();
+    ASSERT_EQ(cudaStreamSynchronize(training.get()), cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(render), cudaSuccess);
+
+    std::vector<unsigned char> host(kBytes);
+    ASSERT_EQ(cudaMemcpy(host.data(), staging, kBytes, cudaMemcpyDeviceToHost), cudaSuccess);
+    for (size_t i = 0; i < kBytes; i += 65536) {
+        ASSERT_EQ(host[i], 0xAA) << "render frame overwrote memory before training frame finished, offset " << i;
+    }
+
+    cudaFree(staging);
+    destroyStreamSafely(render);
 }
 
 TEST_F(TensorMultiStreamTest, MultiThreadMultiStreamHammer) {
