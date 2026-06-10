@@ -1776,6 +1776,11 @@ namespace lfs::core {
             const char* data_ptr = static_cast<const char*>(data_) + storage_offset_ * dtype_size(dtype_);
 
             if (device_ == Device::CUDA) {
+                // A blocking memcpy only orders against the legacy stream; data
+                // produced on the tensor's home stream must be drained first.
+                if (const cudaStream_t home = state_->stream; home != nullptr) {
+                    cudaStreamSynchronize(home);
+                }
                 cudaMemcpy(&value, data_ptr, sizeof(T), cudaMemcpyDeviceToHost);
             } else {
                 value = *static_cast<const T*>(static_cast<const void*>(data_ptr));
@@ -2194,6 +2199,11 @@ namespace lfs::core {
                 T value{};
                 size_t type_size = dtype_size(tensor_->dtype());
                 const void* src_ptr = static_cast<const char*>(tensor_->data_ptr()) + row_index_ * type_size;
+                // Blocking memcpy only orders against the legacy stream; drain
+                // the tensor's home stream first.
+                if (const cudaStream_t home = tensor_->stream(); home != nullptr) {
+                    cudaStreamSynchronize(home);
+                }
                 cudaError_t err = cudaMemcpy(&value, src_ptr, sizeof(T), cudaMemcpyDeviceToHost);
                 if (err != cudaSuccess) {
                     throw std::runtime_error(
