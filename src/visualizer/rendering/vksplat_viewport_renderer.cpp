@@ -1605,7 +1605,9 @@ namespace lfs::vis {
         releaseSharedScratchArena();
         drainRetiredScratchBuffers(true);
         if (render_stream_) {
-            cudaStreamSynchronize(render_stream_);
+            // release_stream synchronizes the stream before migrating its blocks
+            // (and vkDeviceWaitIdle above already idled the device), so no separate
+            // cudaStreamSynchronize is needed here.
             lfs::core::CudaMemoryPool::instance().release_stream(render_stream_);
             cudaStreamDestroy(render_stream_);
             render_stream_ = nullptr;
@@ -3448,6 +3450,21 @@ namespace lfs::vis {
                 storage_it = retired_input_storages_.erase(storage_it);
             } else {
                 ++storage_it;
+            }
+        }
+    }
+
+    void VksplatViewportRenderer::clampOrphanedInputRetirements() {
+        // prepareInputs/overlay key a retirement to the frame's predicted
+        // completion value before the submit is confirmed. If the frame fails or
+        // returns before signalling that value, the entry would only be reclaimed
+        // once a later frame's monotonic timeline happens to pass it — and never,
+        // under a persistent-failure storm. Clamp any entry past the last
+        // confirmed value down to it: the unsubmitted batch never read those
+        // storages, so reclaiming them when the last real frame completes is safe.
+        for (auto& entry : retired_input_storages_) {
+            if (entry.first > last_signaled_render_value_) {
+                entry.first = last_signaled_render_value_;
             }
         }
     }
@@ -5789,6 +5806,12 @@ namespace lfs::vis {
         if (!initialized_ || context_ != &context) {
             return std::unexpected("VkSplat selection overlay requested without reusable render state");
         }
+        // See render(): clamp any retirement this pass extended past a value its
+        // submit never signalled, on every exit path.
+        struct RetirementReconcile {
+            VksplatViewportRenderer* self;
+            ~RetirementReconcile() { self->clampOrphanedInputRetirements(); }
+        } retirement_reconcile{this};
         const lfs::core::CUDAStreamGuard stream_guard(render_stream_);
 
         const std::size_t ring_slot = acquireRingSlot();
@@ -5995,6 +6018,13 @@ namespace lfs::vis {
         if (!context.externalMemoryInteropEnabled()) {
             return std::unexpected("VkSplat forward path requires CUDA/Vulkan external-memory interop");
         }
+        // Reconcile input-storage retirements on every exit (success, early
+        // return, or exception) so a frame that never reached its submit can't
+        // leave an entry keyed to a timeline value that never signals.
+        struct RetirementReconcile {
+            VksplatViewportRenderer* self;
+            ~RetirementReconcile() { self->clampOrphanedInputRetirements(); }
+        } retirement_reconcile{this};
 
         const int active_sh_degree = effectiveRenderShDegree(splat_data, request.sh_degree);
         if (auto ok = ensureInitialized(context); !ok) {

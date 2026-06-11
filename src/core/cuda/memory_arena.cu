@@ -214,6 +214,10 @@ namespace lfs::core {
         wait_params.params.fence.value = release_value;
         if (cudaWaitExternalSemaphoresAsync(&release_semaphore, &wait_params, 1, nullptr) != cudaSuccess) {
             LOG_WARN("RasterizerMemoryArena: external release drain wait failed (value {})", release_value);
+            // The GPU-side fence wait couldn't be enqueued; fall back to a full
+            // device sync so the caller doesn't free/replace the backing under
+            // in-flight CUDA work (the Vulkan batch can't be observed here).
+            cudaDeviceSynchronize();
             return;
         }
         if (cudaStreamSynchronize(nullptr) != cudaSuccess) {

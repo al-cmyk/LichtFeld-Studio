@@ -390,6 +390,9 @@ namespace lfs::vis {
         // reached. force=true destroys all of them unconditionally and is only
         // safe after vkDeviceWaitIdle (reset/teardown).
         void drainRetiredScratchBuffers(bool force);
+        // Clamps input-storage retirements left keyed to a timeline value a
+        // failed/early-exit frame never signalled (run on every render exit).
+        void clampOrphanedInputRetirements();
 
         // Lazily creates a persistent transfer command pool + buffer + fence reused by
         // readOutputImage / sampleDepthAtPixel instead of allocating a fresh pool/fence
