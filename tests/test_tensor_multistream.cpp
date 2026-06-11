@@ -467,3 +467,40 @@ TEST_F(TensorMultiStreamTest, MultiThreadMultiStreamHammer) {
     EXPECT_EQ(failures.load(), 0);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 }
+
+// Mirrors PyTensor::dlpack(stream=consumer): the export records the producer's
+// home-stream work and makes the consumer stream wait on it via bridgeStreams.
+// A gated producer write must therefore be visible to the consumer's readback.
+TEST_F(TensorMultiStreamTest, DLPackExportBridgesHomeStreamOntoConsumer) {
+    GateStream producer;
+    cudaStream_t consumer;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&consumer, cudaStreamNonBlocking), cudaSuccess);
+
+    auto& pool = CudaMemoryPool::instance();
+    void* buffer = pool.allocate(SLAB_BYTES, producer.get());
+    ASSERT_NE(buffer, nullptr);
+
+    // Pinned so the consumer readback stays async — a pageable D2H would block
+    // the host inside the copy, deadlocking against the still-closed gate.
+    unsigned char* host = nullptr;
+    ASSERT_EQ(cudaMallocHost(&host, SLAB_BYTES), cudaSuccess);
+    std::memset(host, 0, SLAB_BYTES);
+
+    producer.close();
+    ASSERT_EQ(cudaMemsetAsync(buffer, 0xCD, SLAB_BYTES, producer.get()), cudaSuccess);
+
+    bridgeStreams(producer.get(), consumer);
+    ASSERT_EQ(cudaMemcpyAsync(host, buffer, SLAB_BYTES, cudaMemcpyDeviceToHost, consumer), cudaSuccess);
+
+    producer.release();
+    ASSERT_EQ(cudaStreamSynchronize(consumer), cudaSuccess);
+
+    for (size_t i = 0; i < SLAB_BYTES; i += 4096) {
+        ASSERT_EQ(host[i], 0xCD) << "consumer readback raced the producer write at offset " << i;
+    }
+
+    cudaFreeHost(host);
+    pool.deallocate(buffer, producer.get());
+    ASSERT_EQ(cudaStreamSynchronize(producer.get()), cudaSuccess);
+    destroyStreamSafely(consumer);
+}
