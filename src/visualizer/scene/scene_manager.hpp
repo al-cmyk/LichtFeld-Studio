@@ -227,6 +227,7 @@ namespace lfs::vis {
         void updatePlyPath(const std::string& ply_name, const std::filesystem::path& ply_path);
         bool reparentNode(const std::string& node_name, const std::string& new_parent_name);
         bool reparentNode(core::NodeId node_id, core::NodeId new_parent_id);
+        bool moveNode(core::NodeId node_id, core::NodeId new_parent_id, int index);
         std::string addGroupNode(const std::string& name, const std::string& parent_name = "");
         std::string addGroupNode(const std::string& name, core::NodeId parent_id);
         std::string addPlySequenceNode(const std::string& name, const std::string& parent_name = "", size_t frame_count = 0);
