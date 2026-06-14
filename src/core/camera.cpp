@@ -115,8 +115,12 @@ namespace lfs::core {
         _FoVx = focal2fov(_focal_x, _camera_width);
         _FoVy = focal2fov(_focal_y, _camera_height);
 
-        // Non-blocking so image loading doesn't serialize with the legacy stream
-        cudaStreamCreateWithFlags(&_stream, cudaStreamNonBlocking);
+        // Non-blocking so image loading doesn't serialize with the legacy stream.
+        // On failure fall back to the default stream rather than a bad handle.
+        if (const cudaError_t err = cudaStreamCreateWithFlags(&_stream, cudaStreamNonBlocking); err != cudaSuccess) {
+            LOG_WARN("Camera: cudaStreamCreateWithFlags failed ({}), falling back to default stream", cudaGetErrorString(err));
+            _stream = nullptr;
+        }
     }
 
     Camera::~Camera() {
@@ -247,8 +251,12 @@ namespace lfs::core {
           _FoVy(other._FoVy) {
         _world_view_transform = transform;
 
-        // Non-blocking so image loading doesn't serialize with the legacy stream
-        cudaStreamCreateWithFlags(&_stream, cudaStreamNonBlocking);
+        // Non-blocking so image loading doesn't serialize with the legacy stream.
+        // On failure fall back to the default stream rather than a bad handle.
+        if (const cudaError_t err = cudaStreamCreateWithFlags(&_stream, cudaStreamNonBlocking); err != cudaSuccess) {
+            LOG_WARN("Camera: cudaStreamCreateWithFlags failed ({}), falling back to default stream", cudaGetErrorString(err));
+            _stream = nullptr;
+        }
     }
     Tensor Camera::K() const {
         // Create [1, 3, 3] zero matrix on same device as world_view_transform

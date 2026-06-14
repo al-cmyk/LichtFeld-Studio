@@ -1291,6 +1291,13 @@ namespace lfs::vis {
                     if (gt_tensor.is_valid() && gt_tensor.ndim() == 3) {
                         const auto gt_layout = lfs::rendering::detectImageLayout(gt_tensor);
                         if (gt_layout != lfs::rendering::ImageLayout::Unknown) {
+                            // The GT photo is a static display image, but on the device its buffer
+                            // belongs to the shared training memory pool, which recycles it and
+                            // overwrites the pixels mid-display (the panel blacks out during
+                            // training). Copy to host now, while the data is valid, so the panel is
+                            // decoupled from device-side churn; the split-view pack reads it back on
+                            // the CPU anyway.
+                            gt_tensor = gt_tensor.cpu();
                             gt_tensor = lfs::rendering::flipImageVertical(gt_tensor, gt_layout);
                             const glm::ivec2 gt_size{
                                 lfs::rendering::imageWidth(gt_tensor, gt_layout),

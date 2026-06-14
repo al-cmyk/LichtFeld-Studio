@@ -1016,7 +1016,7 @@ namespace lfs::io {
             if (is_grayscale) {
                 const auto shape = uint8_tensor.shape();
                 const size_t H = shape[0], W = shape[1];
-                output_tensor = Tensor::zeros(TensorShape({H, W}), Device::CUDA, DataType::Float32);
+                output_tensor = Tensor::empty(TensorShape({H, W}), Device::CUDA, DataType::Float32);
                 cuda::launch_uint8_hw_to_float32_hw(
                     reinterpret_cast<const uint8_t*>(uint8_tensor.data_ptr()),
                     reinterpret_cast<float*>(output_tensor.data_ptr()),
@@ -1031,7 +1031,7 @@ namespace lfs::io {
                         reinterpret_cast<uint8_t*>(output_tensor.data_ptr()),
                         H, W, C, static_cast<cudaStream_t>(cuda_stream));
                 } else {
-                    output_tensor = Tensor::zeros(TensorShape({C, H, W}), Device::CUDA, DataType::Float32);
+                    output_tensor = Tensor::empty(TensorShape({C, H, W}), Device::CUDA, DataType::Float32);
                     cuda::launch_uint8_hwc_to_float32_chw(
                         reinterpret_cast<const uint8_t*>(uint8_tensor.data_ptr()),
                         reinterpret_cast<float*>(output_tensor.data_ptr()),

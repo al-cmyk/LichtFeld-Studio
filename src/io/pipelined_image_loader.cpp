@@ -308,7 +308,11 @@ namespace lfs::io {
         }
 
         if (nvcodec_available) {
-            cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
+            // On failure fall back to the default stream rather than a bad handle.
+            if (const cudaError_t err = cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking); err != cudaSuccess) {
+                LOG_WARN("[PipelinedImageLoader] cudaStreamCreateWithFlags failed ({}), GPU decode falls back to default stream", cudaGetErrorString(err));
+                decode_stream_ = nullptr;
+            }
             gpu_decode_thread_ = std::thread([this] { gpu_batch_decode_thread_func(); });
         }
 
