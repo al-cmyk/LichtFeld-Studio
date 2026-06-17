@@ -452,6 +452,12 @@ namespace lfs::vis {
                          static_cast<core::NodeId>(cmd.new_parent_id));
         });
 
+        cmd::MoveNodeById::when([this](const auto& cmd) {
+            moveNode(static_cast<core::NodeId>(cmd.node_id),
+                     static_cast<core::NodeId>(cmd.new_parent_id),
+                     cmd.index);
+        });
+
         cmd::AddGroup::when([this](const auto& cmd) {
             addGroupNode(cmd.name, cmd.parent_name);
         });
@@ -1027,6 +1033,17 @@ namespace lfs::vis {
             });
     }
 
+    void SceneManager::drainGpuForTensorRelease() {
+        if (auto* const gui_mgr = services().guiOrNull()) {
+            gui_mgr->setVulkanSceneImage(nullptr, glm::ivec2(0, 0), false, 0);
+        }
+        if (auto* const window_mgr = services().windowOrNull()) {
+            if (auto* const vulkan_ctx = window_mgr->getVulkanContext()) {
+                (void)vulkan_ctx->deviceWaitIdle();
+            }
+        }
+    }
+
     void SceneManager::resetToEmptyState(const bool trainer_already_cleared) {
         if (!trainer_already_cleared) {
             if (auto* trainer = services().trainerOrNull()) {
@@ -1038,18 +1055,10 @@ namespace lfs::vis {
         selection_.invalidateNodeMask();
         clearAppearanceModel();
         // Scene clear can fire from a synchronous menu callback inside the current
-        // GUI render iteration. Drop the GUI's tensor pointer and drain the GPU
-        // before scene_.clear() frees the backing memory — otherwise this same
-        // iteration's prepareVulkanSceneInterop dispatches a CUDA copy from
-        // freed memory and the device faults asynchronously.
-        if (auto* const gui_mgr = services().guiOrNull()) {
-            gui_mgr->setVulkanSceneImage(nullptr, glm::ivec2(0, 0), false, 0);
-        }
-        if (auto* const window_mgr = services().windowOrNull()) {
-            if (auto* const vulkan_ctx = window_mgr->getVulkanContext()) {
-                (void)vulkan_ctx->deviceWaitIdle();
-            }
-        }
+        // GUI render iteration; drain before scene_.clear() frees the backing memory,
+        // otherwise this same iteration's prepareVulkanSceneInterop dispatches a CUDA
+        // copy from freed memory and the device faults asynchronously.
+        drainGpuForTensorRelease();
         scene_.clear();
         python::set_application_scene(&scene_);
 
@@ -1152,6 +1161,7 @@ namespace lfs::vis {
             names_to_remove.push_back(name);
         }
 
+        drainGpuForTensorRelease();
         if (auto* rendering = services().renderingOrNull()) {
             rendering->releaseSceneModelResources();
         }
@@ -3324,6 +3334,37 @@ namespace lfs::vis {
         pushSceneGraphMetadataHistoryEntry(
             *this,
             "Reparent Node",
+            history_before,
+            op::SceneGraphMetadataEntry::captureNodes(*this, {node_name}));
+        return true;
+    }
+
+    bool SceneManager::moveNode(const core::NodeId node_id, const core::NodeId new_parent_id, const int index) {
+        const auto* node = scene_.getNodeById(node_id);
+        if (!node)
+            return false;
+        const auto* parent = new_parent_id == core::NULL_NODE ? nullptr : scene_.getNodeById(new_parent_id);
+        if (new_parent_id != core::NULL_NODE && !parent)
+            return false;
+
+        const std::string node_name = node->name;
+        std::string old_parent_name;
+        if (node->parent_id != core::NULL_NODE) {
+            if (const auto* p = scene_.getNodeById(node->parent_id))
+                old_parent_name = p->name;
+        }
+        const std::string new_parent_name = parent ? parent->name : std::string{};
+
+        const auto history_before = op::SceneGraphMetadataEntry::captureNodes(*this, {node_name});
+
+        if (!scene_.moveNode(node_id, new_parent_id, index))
+            return false;
+
+        selection_.invalidateNodeMask();
+        state::NodeReparented{.name = node_name, .old_parent = old_parent_name, .new_parent = new_parent_name}.emit();
+        pushSceneGraphMetadataHistoryEntry(
+            *this,
+            "Move Node",
             history_before,
             op::SceneGraphMetadataEntry::captureNodes(*this, {node_name}));
         return true;
